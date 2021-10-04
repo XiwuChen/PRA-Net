@@ -1,0 +1,2 @@
+from Datasets.ModelNet40_DATASET import ModelNet40_SHAPENAMES
+from Datasets.ScanObjectNN_DATASET import ScanObjectNN_SHAPE_NAMES
