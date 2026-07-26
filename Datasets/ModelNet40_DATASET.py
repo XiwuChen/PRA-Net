@@ -1,6 +1,6 @@
 import os
-import sys
 import glob
+
 import h5py
 import numpy as np
 from torch.utils.data import Dataset
@@ -24,18 +24,18 @@ def download(data_root):
 
 
 def load_data(partition, data_root):
+    """Load and concatenate all HDF5 shards for a dataset partition."""
     download(data_root)
     all_data = []
     all_label = []
     for h5_name in glob.glob(os.path.join(data_root, 'ply_data_%s*.h5' % partition)):
-        f = h5py.File(h5_name)
-        data = f['data'][:].astype('float32')
-        label = f['label'][:].astype('int64')
-        f.close()
+        with h5py.File(h5_name, 'r') as h5_file:
+            data = h5_file['data'][:].astype('float32')
+            label = h5_file['label'][:].astype('int64')
         all_data.append(data)
         all_label.append(label)
-    all_data = np.concatenate(all_data, axis = 0)
-    all_label = np.concatenate(all_label, axis = 0)
+    all_data = np.concatenate(all_data, axis=0)
+    all_label = np.concatenate(all_label, axis=0)
     return all_data, all_label
 
 
@@ -85,7 +85,7 @@ class ModelNet40(Dataset):
         return self.data.shape[0]
 
     def resample(self):
-        # don't need resampe operation on the ModelNet40 dataset
+        """ModelNet40 already stores a fixed point sample for each object."""
         pass
 
 

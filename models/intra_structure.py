@@ -5,17 +5,15 @@ from models.dynamic_feature_aggregation import DFA
 
 
 def get_graph_feature(x, xyz=None, idx=None, k_hat=20):
-    """
-    Get graph features by minus the k_hat nearest neighbors' feature.
-    :param x: (B,C,N)
-        input features
-    :param xyz: (B,3,N) or None
-        xyz coordinate
-    :param idx: (B,N,k_hat)
-        kNN graph index
-    :param k_hat: (int)
-        the neighbor number
-    :return: graph feature (B,C,N,k_hat)
+    """Build relative features for each point and its k-nearest neighbors.
+
+    :param x: Input features with shape ``(B, C, N)``.
+    :param xyz: Coordinates with shape ``(B, 3, N)``. Only used when ``idx``
+        is not supplied.
+    :param idx: Optional precomputed kNN indices with shape ``(B, N, K)``.
+        Passing the graph from the caller avoids recomputing kNN in every ISL.
+    :param k_hat: Number of neighbors.
+    :return: Relative graph features with shape ``(B, C, N, K)``.
     """
     batch_size = x.size(0)
     num_points = x.size(2)
@@ -23,13 +21,12 @@ def get_graph_feature(x, xyz=None, idx=None, k_hat=20):
     if idx is None:
         idx = knn(xyz, k=k_hat)  # (batch_size, num_points, k_hat)
 
-
     idx_base = torch.arange(0, batch_size, device=x.device).view(-1, 1, 1) * num_points
     idx = idx + idx_base
     idx = idx.view(-1)
 
     _, num_dims, _ = x.size()
-    
+
     x = x.transpose(2, 1).contiguous()
     feature = x.view(batch_size * num_points, -1)[idx, :]
     feature = feature.view(batch_size, num_points, k_hat, num_dims)
@@ -40,18 +37,13 @@ def get_graph_feature(x, xyz=None, idx=None, k_hat=20):
 
 
 class ISL(nn.Module):
-
-    def __init__(self, in_channel, out_channel_list, k_hat=20, bias=False,):
-
+    def __init__(self, in_channel, out_channel_list, k_hat=20, bias=False):
         """
-        :param in_channel:
-            input feature channel type:int
-        :param out_channel_list: int or list of int
-            out channel of MLPs
-        :param k_hat: int
-            k_hat in ISL
-        :param bias: bool
-            use bias or not
+        :param in_channel: Combined input channel count. Half is used by each
+            of the self-feature and neighbor-feature branches.
+        :param out_channel_list: Output channels of the branch MLP.
+        :param k_hat: Number of neighbors used by ISL.
+        :param bias: Whether convolution layers use a bias.
         """
         super(ISL, self).__init__()
 
@@ -72,25 +64,16 @@ class ISL(nn.Module):
             last_layer_list.append(nn.BatchNorm2d(out_channel))
             last_layer_list.append(nn.LeakyReLU(negative_slope=0.2, inplace=True))
         self.last_layers = nn.Sequential(*last_layer_list)
-        
-        self.bn = nn.BatchNorm2d(out_channel)
-        
-        
 
+        self.bn = nn.BatchNorm2d(out_channel)
         self.bn2 = nn.BatchNorm1d(out_channel)
-        self.bn = nn.BatchNorm2d(out_channel)
-
-        
         self.DFA_layer = DFA(features=out_channel, M=2, r=1)
-
 
     def forward(self, x, idx_):
         """
-        :param x: (B,3,N)
-            Input point cloud
-        :param idx_: (B,N,k_hat)
-            kNN graph index
-        :return: graph feature: (B,C,N,k_hat)
+        :param x: Point features with shape ``(B, C_in, N)``.
+        :param idx_: Shared kNN graph indices with shape ``(B, N, K)``.
+        :return: Aggregated point features with shape ``(B, C_out, N)``.
         """
 
         x_minus = get_graph_feature(x, idx=idx_, k_hat=self.k)
@@ -98,16 +81,13 @@ class ISL(nn.Module):
         a1 = self.neighbor_feature_learning(x_minus)
         # (B,C,N)
         a2 = self.self_feature_learning(x)
-    
-    
+
         a1 = self.leaky_relu(self.bn(a1))
         # (B,C,N)
         a1 = a1.max(dim=-1, keepdim=False)[0]
         a2 = self.leaky_relu(self.bn2(a2))
         res = self.DFA_layer([a1, a2])
-        
         res = self.last_layers(res)
-
         return res
 
 

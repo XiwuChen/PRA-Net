@@ -1,28 +1,26 @@
 from __future__ import print_function
-import os
+
 import argparse
-import torch
-import torch.optim as optim
-from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR
+import random
+import shutil
+import time
+from functools import partial
+from pathlib import Path
 
 import numpy as np
-from torch.utils.data import DataLoader
 import sklearn.metrics as metrics
+import torch
+import torch.optim as optim
+from torch.utils.data import DataLoader
+from torch.optim.lr_scheduler import CosineAnnealingLR
 from tqdm import tqdm
 import yaml
-import random
-from Datasets.ScanObjectNN_DATASET import ScanObject
+
 from Datasets.ModelNet40_DATASET import ModelNet40
-from utils.util import cal_loss
-
-from models.PRANet_classification import PRANet_classification
-
-
 from Datasets.ModelNetDataLoader_withnorm import ModelNetDataLoader
-
-from utils.util import IOStream
-from functools import partial
-import time
+from Datasets.ScanObjectNN_DATASET import ScanObject
+from models.PRANet_classification import PRANet_classification
+from utils.util import IOStream, cal_loss
 
 torch.backends.cudnn.enabled = False
 
@@ -33,33 +31,36 @@ torch.backends.cudnn.enabled = False
 # torch.backends.cudnn.deterministic = True
 
 
-def _init_(args):
+def _copy_source_snapshot(config_path, destination):
+    """Copy source files used by an experiment into its checkpoint folder."""
+    source_patterns = ("*.py", "models/*.py", "utils/*.py")
+    for pattern in source_patterns:
+        for source_path in Path(".").glob(pattern):
+            shutil.copy2(str(source_path), str(destination / source_path.name))
+    shutil.copy2(str(config_path), str(destination / config_path.name))
+
+
+def _setup_experiment(args):
+    """Seed random generators and prepare the experiment output folders."""
     if args.seed is not None:
-        global seed
-        seed = args.seed
-        random.seed(seed)
-        np.random.seed(seed)
-        torch.manual_seed(seed)
-        torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        torch.cuda.manual_seed(args.seed)
+        torch.cuda.manual_seed_all(args.seed)
 
-    if not os.path.exists('checkpoints'):
-        os.makedirs('checkpoints')
-    if not os.path.exists('checkpoints/' + args.exp_name):
-        os.makedirs('checkpoints/' + args.exp_name)
-    if not os.path.exists('checkpoints/' + args.exp_name + '/' + 'models'):
-        os.makedirs('checkpoints/' + args.exp_name + '/' + 'models')
-    os.system('cp *.py checkpoints' + '/' + args.exp_name + '/')
-    os.system('cp models/*.py checkpoints' + '/' + args.exp_name + '/')
-    os.system('cp utils/*.py checkpoints' + '/' + args.exp_name + '/')
-    os.system('cp ' + args.config + ' checkpoints' + '/' + args.exp_name + '/')
+    experiment_dir = Path("checkpoints") / args.exp_name
+    (experiment_dir / "models").mkdir(parents=True, exist_ok=True)
+    _copy_source_snapshot(Path(args.config), experiment_dir)
+    return experiment_dir
 
 
-def test(epoch, model, test_dataset, test_loader, device, test_num=1):
+def test(epoch, model, test_dataset, test_loader, device, io, test_num=1):
+    """Evaluate a model over one or more random point resamplings."""
     oa_list = []
     mAcc_list = []
     model.eval()
-    for i in range(test_num):
+    for _ in range(test_num):
         test_pred = []
         test_true = []
         test_dataset.resample()
@@ -101,18 +102,22 @@ def train(args, io):
     io.cprint(time.asctime())
 
     if args.checkpoint is not None:
-        model.load_state_dict(torch.load(args.checkpoint))
+        model.load_state_dict(torch.load(args.checkpoint, map_location=device))
 
     # Load dataset
-    assert args.dataset in ['ScanObjectNN', 'ModelNet40', 'ModelNet40Norm']
+    supported_datasets = ['ScanObjectNN', 'ModelNet40', 'ModelNet40Norm']
+    if args.dataset not in supported_datasets:
+        raise ValueError("Unsupported dataset: %s" % args.dataset)
+
     if args.dataset == 'ScanObjectNN':
+        data_root = Path(args.data_root) / "main_split"
         train_dataset = ScanObject(
-            h5file_path=args.data_root + '/main_split/training_objectdataset_augmentedrot_scale75.h5',
+            h5file_path=str(data_root / "training_objectdataset_augmentedrot_scale75.h5"),
             center=True, norm=True, with_bg=True, rotation=True, jit=True,
             num_point=args.num_points)
 
         test_dataset = ScanObject(
-            h5file_path=args.data_root + '/main_split/test_objectdataset_augmentedrot_scale75.h5',
+            h5file_path=str(data_root / "test_objectdataset_augmentedrot_scale75.h5"),
             center=True, norm=True, with_bg=True, rotation=False, jit=False,
             num_point=args.num_points)
 
@@ -130,9 +135,6 @@ def train(args, io):
         test_dataset = ModelNetDataLoader(args.data_root, npoint=args.num_points, split='test', uniform=args.uniform,
                                           normal_channel=True, cache_size=15000, augment=False,
                                           random_drop=args.random_drop)
-    else:
-        raise NotImplementedError('No such dataset ' + args.dataset)
-
     train_loader = DataLoader(train_dataset, num_workers=args.workers,
                               batch_size=args.batch_size, shuffle=True, drop_last=True)
     test_loader = DataLoader(test_dataset, num_workers=args.workers,
@@ -145,9 +147,6 @@ def train(args, io):
     opt = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
     scheduler = CosineAnnealingLR(opt, args.epochs, eta_min=0.001)
 
-    best_acc = 0.0
-    # epoch = 0
-    # test(epoch, model, test_dataset, test_loader, device, test_num=1)
     for epoch in range(args.epochs):
         ####################
         # Train
@@ -159,7 +158,7 @@ def train(args, io):
         train_true = []
         train_dataset.resample()
 
-        for i, (points, label) in tqdm(enumerate(train_loader, 0), total=len(train_loader), smoothing=0.9):
+        for points, label in tqdm(train_loader, total=len(train_loader), smoothing=0.9):
             # (B, N, C)
             points, label = points.to(device), label.to(device).squeeze()
 
@@ -169,14 +168,12 @@ def train(args, io):
             opt.zero_grad()
             # (B, C, N) -> (B, C2)
             logits = model(points)
-            # loss = criterion(logits, label)
             loss = cal_loss(logits, label, args.smoothing)
-            tot_loss = loss
-            tot_loss.backward()
+            loss.backward()
             opt.step()
             preds = logits.max(dim=1)[1]
             count += batch_size
-            train_loss += tot_loss.item() * batch_size
+            train_loss += loss.item() * batch_size
             train_true.append(label.cpu().numpy())
             train_pred.append(preds.detach().cpu().numpy())
 
@@ -196,7 +193,9 @@ def train(args, io):
         ####################
 
         if epoch < 10 or epoch > 200:
-            oa_list, mAcc_list = test(epoch, model, test_dataset, test_loader, device, test_num=1)
+            oa_list, mAcc_list = test(
+                epoch, model, test_dataset, test_loader, device, io, test_num=1
+            )
             io.cprint('Test %d, OA std: %.6f, mean: %.6f' % (epoch, np.std(oa_list), np.average(oa_list)))
             io.cprint('Test %d, mAcc std: %.6f , mean: %.6f' % (epoch, np.std(mAcc_list), np.average(mAcc_list)))
             torch.save(model.state_dict(),
@@ -205,25 +204,30 @@ def train(args, io):
 
 if __name__ == "__main__":
     # Training settings
-    parser = argparse.ArgumentParser(description='PR-Net Classification Training')
-    parser.add_argument('--config', default='cfg/ScanObjectNN_train.yaml', type=str)
+    parser = argparse.ArgumentParser(description='PRA-Net Classification Training')
+    parser.add_argument(
+        '--config',
+        default='cfg/ScanObjectNN_train_PRANet.yaml',
+        type=str,
+    )
     args = parser.parse_args()
     with open(args.config) as f:
-        config = yaml.load(f)
+        config = yaml.safe_load(f)
     print("\n**************************")
     for k, v in config['common'].items():
         setattr(args, k, v)
         print('\n[%s]:' % (k), v)
     print("\n**************************\n")
 
-    _init_(args)
-    print('seed', seed)
+    experiment_dir = _setup_experiment(args)
+    print('seed', args.seed)
 
-    io = IOStream('checkpoints/' + args.exp_name + '/run.log')
-    io.cprint(str(args))
-
-    io.cprint(
-        'Using GPU : ' + str(torch.cuda.current_device()) + ' from ' + str(
-            torch.cuda.device_count()) + ' devices')
-
-    train(args, io)
+    io = IOStream(str(experiment_dir / "run.log"))
+    try:
+        io.cprint(str(args))
+        io.cprint(
+            'Using GPU : ' + str(torch.cuda.current_device()) + ' from ' + str(
+                torch.cuda.device_count()) + ' devices')
+        train(args, io)
+    finally:
+        io.close()

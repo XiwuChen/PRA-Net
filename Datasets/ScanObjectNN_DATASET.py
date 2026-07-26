@@ -1,11 +1,5 @@
-import os
-import sys
-
 import numpy as np
 
-import scipy.misc
-import string
-import pickle
 import plyfile
 import h5py
 import torch
@@ -208,36 +202,37 @@ def get_current_data_discriminator_h5(pcs, labels, types, num_points):
 
 
 def load_h5(h5_filename):
-    f = h5py.File(h5_filename)
-    data = f['data'][:]
-    label = f['label'][:]
+    """Load point coordinates and labels from a ScanObjectNN HDF5 file."""
+    with h5py.File(h5_filename, 'r') as h5_file:
+        data = h5_file['data'][:]
+        label = h5_file['label'][:]
     return data, label
 
 
 def load_withmask_h5(h5_filename):
-    f = h5py.File(h5_filename)
-    data = f['data'][:]
-    label = f['label'][:]
-    mask = f['mask'][:]
-
+    """Load point coordinates, labels, and foreground masks."""
+    with h5py.File(h5_filename, 'r') as h5_file:
+        data = h5_file['data'][:]
+        label = h5_file['label'][:]
+        mask = h5_file['mask'][:]
     return data, label, mask
 
 
 def load_discriminator_h5(h5_filename):
-    f = h5py.File(h5_filename)
-    data = f['data'][:]
-    label = f['label'][:]
-    model_type = f['type'][:]
-
+    """Load point coordinates, labels, and discriminator model types."""
+    with h5py.File(h5_filename, 'r') as h5_file:
+        data = h5_file['data'][:]
+        label = h5_file['label'][:]
+        model_type = h5_file['type'][:]
     return data, label, model_type
 
 
 def load_parts_h5(h5_filename):
-    f = h5py.File(h5_filename)
-    data = f['data'][:]
-    label = f['label'][:]
-    parts = f['parts'][:]
-
+    """Load point coordinates, labels, and per-point part annotations."""
+    with h5py.File(h5_filename, 'r') as h5_file:
+        data = h5_file['data'][:]
+        label = h5_file['label'][:]
+        parts = h5_file['parts'][:]
     return data, label, parts
 
 
@@ -298,14 +293,14 @@ class ScanObject(Dataset):
         :return:
              point: (N,C)
 
-            label: (N)
+            label: scalar class index
 
             mask: None or (N)
             The background mask, not used by default.
         """
         point, label = self.DATA[index], self.LABEL[index]
 
-        # Data augmentaion
+        # Data augmentation is enabled only for the training dataset.
         if self.rotation:
             point = provider.rotate_point_cloud(point)
         if self.jit:
